@@ -39,8 +39,8 @@ Do not wrap the JSON object in markdown codeblocks like ```json. Return ONLY the
             raise ValueError("GROQ_API_KEY environment variable not set")
         self.client = Groq(api_key=api_key)
 
-    def extract_json_after_think(self, text: str) -> Dict[str, Any]:
-        """Parse thinking response and return extracted JSON object."""
+    def extract_json_after_think(self, text: str, request_id: str = "") -> Dict[str, Any]:
+        """Parse thinking response and return extracted JSON object with extreme resilience."""
         if "</think>" in text:
             text_after = text.split("</think>")[-1]
         else:
@@ -51,8 +51,51 @@ Do not wrap the JSON object in markdown codeblocks like ```json. Return ONLY the
         
         if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
             json_str = text_after[first_brace:last_brace+1]
-            # Replace single quotes or unescaped strings if any, but standard json loads usually works
-            return json.loads(json_str)
+            
+            # Clean up markdown code block tags if present
+            json_str = json_str.replace("```json", "").replace("```", "").strip()
+            
+            try:
+                return json.loads(json_str)
+            except Exception as e:
+                # Attempt regex-based key-value extraction for robustness
+                try:
+                    reconstructed = {}
+                    
+                    # 1. Match string fields
+                    for field in ['request_id', 'affordability_status', 'recommended_payment_method', 
+                                  'payment_plan', 'earliest_date_for_full_payment', 
+                                  'spending_changes_needed', 'decision_explanation']:
+                        match = re.search(f'"{field}"\\s*:\\s*"([^"]*)"', json_str)
+                        if match:
+                            reconstructed[field] = match.group(1)
+                            
+                    # 2. Match numeric fields
+                    match_num = re.search(r'"amount_safe_to_pay"\s*:\s*([\d\.]+)', json_str)
+                    if match_num:
+                        reconstructed['amount_safe_to_pay'] = float(match_num.group(1))
+                        
+                    # 3. Match array fields
+                    match_ref = re.search(r'"supporting_references"\s*:\s*\[([^\]]*)\]', json_str)
+                    if match_ref:
+                        ref_str = match_ref.group(1)
+                        reconstructed['supporting_references'] = [r.strip().replace('"', '') for r in ref_str.split(',') if r.strip()]
+                    else:
+                        reconstructed['supporting_references'] = []
+                        
+                    # Verify we got the essential fields
+                    required = ['request_id', 'affordability_status', 'recommended_payment_method', 
+                                'payment_plan', 'earliest_date_for_full_payment', 'spending_changes_needed', 
+                                'decision_explanation']
+                    if all(k in reconstructed for k in required):
+                        if 'amount_safe_to_pay' not in reconstructed:
+                            reconstructed['amount_safe_to_pay'] = 0.0
+                        return reconstructed
+                except Exception as inner_e:
+                    pass
+                
+                raise ValueError(f"JSON loads failed and reconstruction failed: {str(e)}")
+                
         raise ValueError("No valid JSON block found in response text")
 
     def process_request(self, request_id: str, user_id: str) -> Dict[str, Any]:
@@ -133,9 +176,48 @@ Based on these facts, run your financial reasoning, and output the required JSON
             'total_tokens': getattr(usage, 'total_tokens', 0)
         }
 
-        # 4. Extract and parse JSON
-        decision = self.extract_json_after_think(raw_content)
-        
+        # 4. Extract and parse JSON with robust fallback
+        try:
+            decision = self.extract_json_after_think(raw_content, request_id)
+        except Exception as json_err:
+            # Mathematical/programmatic fallback when JSON extraction fails
+            min_balance_to_keep = float(profile_data.get('minimum_balance_to_keep', 0.0))
+            requested_amount = float(request_data.get('requested_amount', 0.0))
+            safe_amount = self.simulator.calculate_safe_amount(user_id, req_date, requested_amount, min_balance_to_keep)
+            earliest_date = self.simulator.calculate_earliest_full_payment_date(user_id, requested_amount, req_date, min_balance_to_keep)
+            
+            # Formulate the safest programmatic plan
+            if safe_amount >= requested_amount:
+                affordability_status = "affordable_now"
+                recommended_payment_method = "full_payment"
+                payment_plan = "none"
+                earliest_date_for_full_payment = req_date
+                explanation = f"The requested amount of {requested_amount:.2f} is fully safe to pay immediately since the projected daily balance stays safely above the required minimum balance of {min_balance_to_keep:.2f} throughout the 90-day forecast."
+            elif earliest_date:
+                affordability_status = "affordable_later"
+                recommended_payment_method = "wait"
+                payment_plan = f"{earliest_date}:{requested_amount}"
+                earliest_date_for_full_payment = earliest_date
+                explanation = f"The request is affordable later. Waiting until {earliest_date} is recommended to avoid dropping the balance below the required minimum of {min_balance_to_keep:.2f}."
+            else:
+                affordability_status = "not_affordable"
+                recommended_payment_method = "not_recommended"
+                payment_plan = "none"
+                earliest_date_for_full_payment = ""
+                explanation = f"The requested payment is currently not affordable within the 90-day forecast period without violating the required minimum balance of {min_balance_to_keep:.2f}."
+                
+            decision = {
+                "request_id": request_id,
+                "amount_safe_to_pay": min(safe_amount, requested_amount),
+                "affordability_status": affordability_status,
+                "recommended_payment_method": recommended_payment_method,
+                "payment_plan": payment_plan,
+                "earliest_date_for_full_payment": earliest_date_for_full_payment,
+                "spending_changes_needed": "none",
+                "decision_explanation": explanation + " (Programmatic Fallback)",
+                "supporting_references": ["system_simulator_fallback"]
+            }
+
         # 5. Overwrite LLM's arithmetic with deterministic simulation values
         min_balance_to_keep = float(profile_data.get('minimum_balance_to_keep', 0.0))
         requested_amount = float(request_data.get('requested_amount', 0.0))
