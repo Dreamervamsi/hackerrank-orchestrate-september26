@@ -1,3 +1,5 @@
 chat_transcript.json
 log.txt
 .env
+__pycache__/
+__init__.py
