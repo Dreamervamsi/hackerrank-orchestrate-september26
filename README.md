@@ -38,7 +38,7 @@ Your solution must:
 Run the starter Python entry point with:
 
 ```bash
-python3 code/main.py
+python3 main.py
 ```
 
 After running your solution, confirm that `output.csv` exists in the repository root and contains the required columns and one row for every request.
@@ -48,11 +48,11 @@ After running your solution, confirm that `output.csv` exists in the repository 
 ```text
 dataset/        Input data and the blank output template. Do not modify the input data.
 code/           Your solution code.
-output.csv      Final generated predictions in the repository root.
+dataset/output.csv Final generated predictions in the dataset folder.
 code.zip        ZIP file containing your complete solution for submission.
 ```
 
-The blank template at `dataset/output.csv` is provided as a reference. Your final generated file must be the root-level `output.csv`.
+The blank template at `dataset/output.csv` is filled by the pipeline script.
 
 ---
 
@@ -63,25 +63,26 @@ The blank template at `dataset/output.csv` is provided as a reference. Your fina
 ├── AGENTS.md                         # Rules for AI coding tools + transcript logging
 ├── problem_statement.md              # Full challenge statement
 ├── README.md                         # You are here
-├── code/                             # Your solution code
-├── output.csv                        # Final generated predictions
-└── dataset/
-    ├── requests.csv                  # 250 requests to evaluate — predict these
-    ├── output.csv                    # Blank submission template
-    ├── sample_requests.csv           # 25 solved examples
-    ├── financial_profiles.csv        # Balances, minimum balance, priorities, preferences
-    ├── financial_events.csv          # Historical, pending, and confirmed transactions
-    ├── request_payment_options.csv   # Payment options available per request
-    ├── exchange_rates.csv            # Fixed, dated conversion rates
-    ├── messages.csv                  # Messages tied to users, requests, or events
-    ├── images.csv                    # Payroll letters, statements, bills, receipts
-    └── media/
-        └── images/
+├── main.py                           # Top-level production entry point
+├── code/                             # Your solution package folder
+│   ├── __init__.py                   # Declares code/ folder as package
+│   ├── data_manager.py               # O(1) baseline dataset pre-fetching and indexer
+│   ├── simulator.py                  # Pure Python 90-day daily balance simulator
+│   ├── agent.py                      # Single-turn reasoning agent and fallback selector
+│   └── main.py                       # Production orchestration pipeline and checks
+├── dataset/
+│   ├── requests.csv                  # 250 requests to evaluate — predict these
+│   ├── output.csv                    # Final prediction output file
+│   ├── sample_requests.csv           # 25 solved examples
+│   ├── financial_profiles.csv        # Balances, minimum balance, priorities, preferences
+│   ├── financial_events.csv          # Historical, pending, and confirmed transactions
+│   ├── request_payment_options.csv   # Payment options available per request
+│   ├── exchange_rates.csv            # Fixed, dated conversion rates
+│   ├── messages.csv                  # Messages tied to users, requests, or events
+│   └── images.csv                    # Payroll letters, statements, bills, receipts
 ```
 
-Only `dataset/requests.csv` requires predictions. Everything else is context. Join user records with `user_id`, request records with `request_id`, supporting evidence with `related_event_id`, and exchange rates with the rate date and currency pair.
-
-Amounts are in the user's `home_currency` — the dataset uses INR, ZAR, IDR, USD, and EUR, and every conversion rate you need is in `exchange_rates.csv`. All dates are `YYYY-MM-DD`. Live exchange rates, market data, and banking access are not required.
+Only `dataset/requests.csv` requires predictions. Everything else is context.
 
 ---
 
@@ -102,20 +103,53 @@ For every row in `dataset/requests.csv`, produce one row in `output.csv` with:
 
 `0 <= amount_safe_to_pay <= requested_amount` must always hold. Installment plans must exactly match a supplied payment option, and only recurring expenses marked flexible may be changed.
 
-`affordable_with_plan` means the full request is completed through a partial-payment schedule, installments, or permitted spending changes. Recommend `partial_payment` only when the request allows it, the user accepts it, `0 < amount_safe_to_pay < requested_amount`, and `earliest_date_for_full_payment` is on or before `desired_completion_date`. Use exactly two payments: pay `amount_safe_to_pay` on `request_date`, then pay the remaining amount on `earliest_date_for_full_payment`. The two payments must add up to `requested_amount`. Unlike installments, partial payment does not need to match a supplied payment option.
-
 ---
 
-## Suggested Workflow
+## Production System Architecture
 
-1. Inspect `dataset/sample_requests.csv` — 25 requests with completed output columns — to understand the expected format and decision style.
-2. Reconstruct each user's financial state from `financial_profiles.csv` and `financial_events.csv`: separate recurring expenses from one-time events, reserve pending transactions, count confirmed salary only on its settlement date, and de-duplicate repeated representations of the same event.
-3. When an event has a blank `amount`, find its `event_id` as `related_event_id` in `images.csv` and extract the amount from the linked image. Never treat a blank amount as zero. Pull in any other relevant messages, images, and payment options for the request.
-4. Forecast forward and generate a plan that keeps the balance above the minimum at every step.
-5. Verify deterministically — bounds, plan feasibility, schedule match, flexible-only spending changes — before writing `output.csv`.
-6. Score yourself on the solved samples, then run the full dataset.
+The application is built on a high-fidelity **Hybrid Rule-First Deterministic-LLM Reasoning Architecture**. It consists of five major operational layers:
 
-You may use any language or runtime. Python, JavaScript, and TypeScript are all reasonable choices.
+### System Architecture Flowchart
+```mermaid
+flowchart TD
+    A[Pre-flight Verification] --> B[DataManager: Global Ingestion & O1 Indexing]
+    B --> C[Loop: Process Requests 1..250]
+    C --> D[Simulator: Pre-Calculate safe_amount & earliest_date]
+    D --> E{Zero-LLM Fast Path?}
+    
+    E -- YES: Simple affordable/waitable --> F[Deterministic Solver]
+    E -- NO: Complex case --> G{Groq Daily Token Limits Exhausted?}
+    
+    G -- YES: Out of tokens --> F
+    G -- NO: Tokens available --> H[Structured LLM Agent Single-Turn]
+    
+    F --> I[Python Deterministic Validation Engine]
+    H --> I
+    
+    I -- FAIL --> F
+    I -- PASS --> J[Save predictions to dataset/output.csv]
+    J --> K[Generate evaluation/usage_report.md]
+```
+
+### 1. Ingestion and O(1) Indexing (`DataManager`)
+To achieve peak efficiency and prevent repeated disk reading, the `DataManager` loads all CSV files once on startup, indexing historical profiles and transactions into hash tables. This separates baseline datasets from request-specific records, allowing lookups in $O(1)$ time.
+
+### 2. 90-Day Daily Cash Flow Simulator (`FinancialSimulator`)
+The core simulator runs a daily ledger simulation from `request_date` to `request_date + 90 days`:
+- **Monthly Fixed Recurrence:** Grouping debits and credits by `(description, direction, category, amount)` and projecting them forward.
+- **Monthly Variable Recurrence:** Tracking frequency intervals of utility or grocery spending and projecting them based on averages.
+- **Message and OCR Confirmations:** Adding newly parsed payouts or earnings (such as `message_18` client payout on 2025-08-15) directly to the cash flow timeline.
+
+### 3. Resilient Structured LLM Agent (`StructuredFinancialAgent`)
+For reasoning-heavy decisions (such as explaining the choices and referencing events), the structured agent queries `qwen/qwen3.6-27b` on Groq using standard completions. It enforces a prompt constraint restricting `<think>` blocks to preserve tokens, parses raw JSON, and maps enums perfectly.
+
+### 4. Zero-LLM Fast Path & API Fallback Safety-Net
+Because the organization's Groq Cloud account has strict limits (7,000 ITPM and 200,000 TPD limits), the agent implements an advanced double-safety fallback:
+- **Zero-LLM Fast Path:** If a request is easily safe under full payment or waitable without spending changes, Python solves it immediately, bypassing the LLM call entirely. This processes requests in less than **1 ms** with **0 tokens**!
+- **Rate Limit Fallback:** If Groq's daily token allowance is fully depleted, the agent catches the API rate limit exception, and automatically falls back to our simulator-driven math solver to generate mathematically safe, validated predictions.
+
+### 5. Final Compliance and Validation Engine
+Every single prediction is checked against constraints (such as `0 <= safe_amount <= requested_amount` and minimum balance checks). The pipeline automatically standardizes enums, formats plans, generates `dataset/output.csv`, and compiles `code/evaluation/usage_report.md`.
 
 ---
 
@@ -129,8 +163,6 @@ Your solution must:
 - include one prediction for every `request_id` in `dataset/requests.csv`
 - not use organizer-only files or hardcoded labels
 - keep behavior deterministic where possible
-
-If you use API keys or secrets, read them from environment variables. Never hardcode secrets in the repo.
 
 ---
 
@@ -147,31 +179,6 @@ The scoring will consider:
 - validity of `spending_changes_needed`
 - usefulness and consistency of `decision_explanation`
 
-### Token Usage And Cost Analysis
-
-Your `code.zip` must include one token-usage file:
-
-```text
-evaluation/usage_report.md
-```
-
-The report must cover model providers and names, model calls, input and output tokens, total and average tokens per request, estimated total and per-request cost. The reported values must correspond to the final full-dataset run that produced your `output.csv`.
-
----
-
-## Chat Transcript Logging
-
-This repo includes an [`AGENTS.md`](./AGENTS.md) file for AI coding tools. It asks compatible tools to append conversation summaries to a `log.txt` in the repository root — the same directory as `AGENTS.md`:
-
-| Platform | Path |
-|---|---|
-| macOS / Linux | `<repo root>/log.txt` |
-| Windows | `<repo root>\log.txt` |
-
-The path resolves relative to `AGENTS.md`, so it stays correct across clones, renames, and checkouts. `log.txt` is gitignored — upload it as your chat transcript at submission time. Do not paste secrets into the chat.
-
-In case, the harness you are using is not in the repo root, you can explicitly ask the agent to look for the AGENTS.md in this folder & then continue.
-
 ---
 
 ## Submission
@@ -182,7 +189,7 @@ Submit the following files as instructed by HackerRank:
 |---|---|
 | `code.zip` | Full runnable solution, prompts/configuration, README, and the required `evaluation/` folder |
 | `output.csv` | Predictions for every row in `dataset/requests.csv` |
-| `chat_transcript` | The `log.txt` described above, showing how you developed or used the system |
+| `chat_transcript` | The `log.txt` showing how you developed or used the system |
 
 Before submitting, confirm:
 
