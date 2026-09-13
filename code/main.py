@@ -152,8 +152,9 @@ class BatchPipeline:
                     'decision_explanation': f"System processing error: {str(e)}"
                 })
                 
-            # Pause between requests to stay comfortably below rate limits
-            time.sleep(1.0)
+            # Pause between requests only if an actual API call was made to stay below rate limits
+            if 'res' in locals() and res.get('token_stats', {}).get('total_tokens', 0) > 0:
+                time.sleep(1.0)
             print()
             
         self.total_duration_sec = time.time() - start_time
