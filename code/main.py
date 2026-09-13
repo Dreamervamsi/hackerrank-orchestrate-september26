@@ -161,7 +161,7 @@ class BatchPipeline:
         # 2. Save final predictions to output.csv
         output_df = pd.DataFrame(results)
         output_df.to_csv(OUTPUT_FILE, index=False)
-        self.log(f"✓ Saved final predictions of {len(output_df)} requests to: {OUTPUT_FILE}")
+        self.log(f"  Saved final predictions of {len(output_df)} requests to: {OUTPUT_FILE}")
         
         # 3. Generate usage report
         self.generate_usage_report()
@@ -214,7 +214,7 @@ This file summarizes the final full-dataset run's token metrics and cost analysi
         Report_Dir.mkdir(parents=True, exist_ok=True)
         with open(REPORT_FILE, 'w', encoding='utf-8') as f:
             f.write(report_content)
-        self.log(f"✓ Saved final evaluation usage report to: {REPORT_FILE}")
+        self.log(f"  Saved final evaluation usage report to: {REPORT_FILE}")
 
     def print_final_summary(self):
         print()
