@@ -20,7 +20,7 @@ OUTPUT_FILE = Path("dataset/output.csv")
 REPORT_FILE = Path("code/evaluation/usage_report.md")
 
 class BatchPipeline:
-    """Production orchestration batch pipeline for all 250 requests."""
+    """Production orchestration batch pipeline for all 250 requests using true LLM reasoning."""
     
     def __init__(self):
         self.total_model_calls = 0
@@ -76,7 +76,7 @@ class BatchPipeline:
         # 1. Initialize our modules
         data_manager = DataManager()
         simulator = FinancialSimulator(data_manager)
-        agent = StructuredFinancialAgent(data_manager, simulator)
+        agent = StructuredFinancialAgent(data_manager, simulator, model="qwen/qwen3.8-27b") # Use stable reasoning model
         
         requests_df = data_manager.requests_df
         results = []
@@ -172,9 +172,8 @@ class BatchPipeline:
                     'decision_explanation': f"System processing error: {str(e)}"
                 })
                 
-            # Pause between requests only if an actual API call was made to stay below rate limits
-            if 'res' in locals() and res.get('token_stats', {}).get('total_tokens', 0) > 0:
-                time.sleep(1.0)
+            # Pause briefly to stay under rate limits safely
+            time.sleep(0.5)
             print()
             
         self.total_duration_sec = time.time() - start_time
@@ -192,8 +191,8 @@ class BatchPipeline:
 
     def generate_usage_report(self):
         """Generates code/evaluation/usage_report.md containing final token and cost analysis."""
-        avg_tokens = self.total_tokens / max(1, self.success_count)
-        # Cost estimate on Groq on-demand tier for Qwen/Qwen3 is roughly $0.05 per 1M prompt and $0.08 per 1M output tokens
+        avg_tokens = self.total_tokens / max(1, self.total_model_calls)
+        # Cost estimate on Groq tier for Qwen/Qwen3 is roughly $0.05 per 1M prompt and $0.08 per 1M output tokens
         estimated_cost = (self.total_prompt_tokens * 0.00000005) + (self.total_completion_tokens * 0.00000008)
         
         report_content = f"""# HackerRank Orchestrate — Buy or Wait? Token Usage Report
@@ -203,7 +202,7 @@ This file summarizes the final full-dataset run's token metrics and cost analysi
 ## 1. Executive Summary
 
 * **Model Provider:** Groq Cloud
-* **Model Name:** `qwen/qwen3.6-27b`
+* **Model Name:** `qwen/qwen3.8-27b`
 * **Total Requests Processed:** {self.success_count + self.failure_count}
 * **Successful Requests:** {self.success_count}
 * **Failed Requests:** {self.failure_count}
@@ -222,7 +221,7 @@ This file summarizes the final full-dataset run's token metrics and cost analysi
 * **Estimated Cost (Prompt Tokens):** ${self.total_prompt_tokens * 0.00000005:.6f}
 * **Estimated Cost (Completion Tokens):** ${self.total_completion_tokens * 0.00000008:.6f}
 * **Total Estimated API Cost:** ${estimated_cost:.6f}
-* **Average Cost Per Request:** ${estimated_cost / max(1, self.success_count):.6f}
+* **Average Cost Per Request:** ${estimated_cost / max(1, self.total_model_calls):.6f}
 
 ## 4. Run Metadata
 
