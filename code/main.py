@@ -125,14 +125,34 @@ class BatchPipeline:
                     
                 self.log(f"  [OK] Tokens: {token_stats['total_tokens']} | Duration: {duration:.2f}s")
                 
+                # Standardize payment_plan representation to match contest guidelines perfectly!
+                method = decision['recommended_payment_method']
+                req_amt = float(row['requested_amount'])
+                req_date = row['request_date']
+                earliest_date = decision['earliest_date_for_full_payment']
+                
+                def format_amount(amount: float) -> str:
+                    if amount == int(amount):
+                        return str(int(amount))
+                    return f"{amount:.2f}"
+                
+                if method == 'full_payment':
+                    payment_plan = f"{req_date}:{format_amount(req_amt)}"
+                elif method == 'wait' and earliest_date:
+                    payment_plan = f"{earliest_date}:{format_amount(req_amt)}"
+                elif method == 'not_recommended':
+                    payment_plan = "none"
+                else:
+                    payment_plan = decision.get('payment_plan', 'none')
+
                 # Format output columns
                 results.append({
                     'request_id': decision['request_id'],
                     'amount_safe_to_pay': decision['amount_safe_to_pay'],
                     'affordability_status': decision['affordability_status'],
                     'recommended_payment_method': decision['recommended_payment_method'],
-                    'payment_plan': decision['payment_plan'],
-                    'earliest_date_for_full_payment': decision['earliest_date_for_full_payment'],
+                    'payment_plan': payment_plan,
+                    'earliest_date_for_full_payment': decision['earliest_date_for_full_payment'] if decision['earliest_date_for_full_payment'] else '',
                     'spending_changes_needed': decision['spending_changes_needed'],
                     'decision_explanation': decision['decision_explanation']
                 })
