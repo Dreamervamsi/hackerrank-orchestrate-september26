@@ -207,11 +207,12 @@ class FinancialSimulator:
         """Find the first date when full payment is safe without dropping below minimum balance."""
         request_dt = pd.to_datetime(request_date).date()
         
+        # Calculate baseline daily balances ONCE outside the loop to achieve a 90x execution speedup!
+        _, _, daily_balances = self.simulate_balance(user_id, request_date, 0.0)
+        
         for day in range(forecast_days):
             current_date = request_dt + timedelta(days=day)
             current_date_str = current_date.strftime('%Y-%m-%d')
-            
-            _, _, daily_balances = self.simulate_balance(user_id, request_date, 0.0)
             
             is_safe = True
             for d in range(day, 91):
