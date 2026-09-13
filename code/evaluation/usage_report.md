@@ -28,6 +28,6 @@ This file summarizes the final full-dataset run's token metrics and cost analysi
 
 ## 4. Run Metadata
 
-* **Total Duration:** 1.38 minutes
-* **Average Latency Per Request:** 0.33 seconds
-* **Timestamp:** 2026-09-13 14:30:50 India Standard Time
+* **Total Duration:** 0.77 minutes
+* **Average Latency Per Request:** 0.19 seconds
+* **Timestamp:** 2026-09-13 14:42:28 India Standard Time
