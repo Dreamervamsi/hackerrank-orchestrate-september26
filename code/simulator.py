@@ -5,13 +5,25 @@ import re
 from typing import Dict, List, Any, Tuple, Optional
 
 class FinancialSimulator:
-    """Performs deterministic 90-day daily balance projections and policy validations."""
+    """Performs deterministic 90-day daily balance projections and policy validations with active caching."""
     
     def __init__(self, data_manager):
         self.data_manager = data_manager
+        self.clear_cache()
+        
+    def clear_cache(self):
+        """Clears request-level simulation cache."""
+        self._cache_user_id = None
+        self._cache_patterns = None
+        self._cache_message_txs = None
+        self._cache_pending_debits_sum = None
 
     def detect_recurrence(self, user_id: str, request_date: str) -> List[Dict]:
         """Detect recurring monthly fixed or interval-based debits and credits from history."""
+        # Use cache if available
+        if self._cache_user_id == user_id and self._cache_patterns is not None:
+            return self._cache_patterns
+            
         request_dt = pd.to_datetime(request_date).date()
         df = self.data_manager.get_events(user_id)
         if len(df) == 0:
@@ -76,8 +88,54 @@ class FinancialSimulator:
         min_balance = balance
         min_date = request_dt
         
-        patterns = self.detect_recurrence(user_id, request_date)
+        # Check cache hit
+        cache_hit = (self._cache_user_id == user_id)
         
+        if cache_hit:
+            patterns = self._cache_patterns
+            message_txs = self._cache_message_txs
+            pending_debits_sum = self._cache_pending_debits_sum
+        else:
+            patterns = self.detect_recurrence(user_id, request_date)
+            
+            # Parse message confirmed transactions
+            message_txs = []
+            raw_msgs = self.data_manager.messages_df[self.data_manager.messages_df['user_id'] == user_id]
+            for idx, row in raw_msgs.iterrows():
+                text = str(row.get('message_text', ''))
+                amount_match = re.search(r'(IDR|USD|EUR|ZAR|INR)\s*([\d,\.]+)', text)
+                date_match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
+                if amount_match and date_match:
+                    curr = amount_match.group(1)
+                    amount_str = amount_match.group(2).replace('.', '').replace(',', '')
+                    if curr in ['IDR', 'INR']:
+                        amount = float(amount_str)
+                    else:
+                        amount_str_clean = amount_match.group(2).replace(',', '')
+                        amount = float(amount_str_clean)
+                    date = pd.to_datetime(date_match.group(1)).date()
+                    if date >= request_dt:
+                        direction = 'credit' if any(w in text.lower() for w in ['pembayaran', 'payout', 'gaji', 'salary', 'credit', 'approved', 'disetujui']) else 'debit'
+                        message_txs.append({
+                            'description': f"Message {row['message_id']}",
+                            'direction': direction,
+                            'amount': amount,
+                            'date': date
+                        })
+            
+            # Sum up pending debits
+            pending_debits_sum = 0.0
+            df = self.data_manager.get_events(user_id)
+            if len(df) > 0:
+                pending_debits_sum = sum(e['amount'] for idx, e in df[df['status'] == 'pending'].iterrows()
+                                         if e['direction'] == 'debit' and pd.notna(e['amount']))
+                                         
+            # Save cache
+            self._cache_user_id = user_id
+            self._cache_patterns = patterns
+            self._cache_message_txs = message_txs
+            self._cache_pending_debits_sum = pending_debits_sum
+
         # Parse spending changes to apply stops and reductions
         stops = set()
         reductions = {}
@@ -89,42 +147,20 @@ class FinancialSimulator:
                 elif len(parts) == 3 and parts[0] == 'reduce_to':
                     reductions[parts[1]] = float(parts[2])
 
-        # Get message confirmed transactions
-        message_txs = []
-        raw_msgs = self.data_manager.messages_df[self.data_manager.messages_df['user_id'] == user_id]
-        for idx, row in raw_msgs.iterrows():
-            text = str(row.get('message_text', ''))
-            amount_match = re.search(r'(IDR|USD|EUR|ZAR|INR)\s*([\d,\.]+)', text)
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', text)
-            if amount_match and date_match:
-                curr = amount_match.group(1)
-                amount_str = amount_match.group(2).replace('.', '').replace(',', '')
-                if curr in ['IDR', 'INR']:
-                    amount = float(amount_str)
-                else:
-                    amount_str_clean = amount_match.group(2).replace(',', '')
-                    amount = float(amount_str_clean)
-                date = pd.to_datetime(date_match.group(1)).date()
-                if date >= request_dt:
-                    direction = 'credit' if any(w in text.lower() for w in ['pembayaran', 'payout', 'gaji', 'salary', 'credit', 'approved', 'disetujui']) else 'debit'
-                    message_txs.append({
-                        'description': f"Message {row['message_id']}",
-                        'direction': direction,
-                        'amount': amount,
-                        'date': date
-                    })
-
-        # Reserve pending transactions
-        # Status 'pending' debits from state are applied on day 0/1
-        df = self.data_manager.get_events(user_id)
-        if len(df) > 0:
+        # Adjust balance by pending debits (filtering out stops if any)
+        # If there are stops, recalculate pending debits sum, else use cached sum
+        if stops:
+            df = self.data_manager.get_events(user_id)
             pending_debits = sum(e['amount'] for idx, e in df[df['status'] == 'pending'].iterrows()
                                  if e['direction'] == 'debit' and pd.notna(e['amount'])
                                  and e['event_id'] not in stops)
-            balance -= pending_debits
-            if balance < min_balance:
-                min_balance = balance
-                min_date = request_dt
+        else:
+            pending_debits = pending_debits_sum
+            
+        balance -= pending_debits
+        if balance < min_balance:
+            min_balance = balance
+            min_date = request_dt
 
         # Track variable next triggers
         next_trigger_dates = {}
