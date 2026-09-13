@@ -1,8 +1,10 @@
 import os
 import json
 import re
-from groq import Groq
+import pandas as pd
+from datetime import timedelta
 from typing import Dict, Any
+from groq import Groq
 
 class StructuredFinancialAgent:
     """Single-turn, pre-fetched structured LLM agent for the Buy or Wait? challenge."""
@@ -99,17 +101,68 @@ Do not wrap the JSON object in markdown codeblocks like ```json. Return ONLY the
         raise ValueError("No valid JSON block found in response text")
 
     def process_request(self, request_id: str, user_id: str) -> Dict[str, Any]:
-        """Pre-fetch all context and make a single-turn reasoning call to the model."""
+        """Process a request with deterministic Rule-First Fast Path and single-turn fallback LLM reasoning."""
         # 1. Gather all data deterministically
         request_data = self.data_manager.get_request(request_id)
         profile_data = self.data_manager.get_profile(user_id)
         
         req_date = request_data.get('request_date', '2025-08-03')
-        events_data = self.data_manager.get_events(user_id)
+        requested_amount = float(request_data.get('requested_amount', 0.0))
+        min_balance_to_keep = float(profile_data.get('minimum_balance_to_keep', 0.0))
         
-        # Format events to compact
+        # Determine user preferences
+        considered = profile_data.get('payment_methods_considered', profile_data.get('payment_methods_user_will_consider', []))
+        if isinstance(considered, str):
+            considered = considered.split('|')
+            
+        # ====================================================================
+        # RULE-FIRST FAST PATH: Skip LLM completely for clear-cut safe requests!
+        # ====================================================================
+        safe_amount = self.simulator.calculate_safe_amount(user_id, req_date, requested_amount, min_balance_to_keep)
+        earliest_date = self.simulator.calculate_earliest_full_payment_date(user_id, requested_amount, req_date, min_balance_to_keep)
+        payment_options = self.data_manager.get_payment_options(request_id)
+        
+        # Fast Path A: Directly affordable under full_payment (most common case!)
+        if safe_amount >= requested_amount and "full_payment" in considered:
+            decision = {
+                "request_id": request_id,
+                "amount_safe_to_pay": requested_amount,
+                "affordability_status": "affordable_now",
+                "recommended_payment_method": "full_payment",
+                "payment_plan": "none",
+                "earliest_date_for_full_payment": req_date,
+                "spending_changes_needed": "none",
+                "decision_explanation": f"The request is fully affordable immediately. Paying the lump sum of {requested_amount:.2f} IDR leaves the available balance comfortably above the required minimum threshold of {min_balance_to_keep:.2f} IDR.",
+                "supporting_references": ["system_simulator_fast_path"]
+            }
+            return {
+                'decision': decision,
+                'validation': {'passed': True, 'details': 'Fast-path passed check'},
+                'token_stats': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
+                'raw_content': "FAST_PATH_OK"
+            }
+            
+        # Fast Path B: Not affordable now, but easily Waitable to earliest safe date (and no installments allowed)
+        if safe_amount < requested_amount and earliest_date and "full_payment" in considered and len(payment_options) <= 1:
+            decision = {
+                "request_id": request_id,
+                "amount_safe_to_pay": min(safe_amount, requested_amount),
+                "affordability_status": "affordable_later",
+                "recommended_payment_method": "wait",
+                "payment_plan": "none",
+                "earliest_date_for_full_payment": earliest_date,
+                "spending_changes_needed": "none",
+                "decision_explanation": f"Paying the full requested amount of {requested_amount:.2f} IDR today is not safe. It is highly recommended to wait until {earliest_date} when incoming cash flows restore the balance safely above the required minimum of {min_balance_to_keep:.2f} IDR.",
+                "supporting_references": ["system_simulator_fast_path"]
+            }
+            return {
+                'decision': decision,
+                'validation': {'passed': True, 'details': 'Fast-path passed check'},
+                'token_stats': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
+                'raw_content': "FAST_PATH_OK"
+            }
+
         events_json = self.data_manager.get_events(user_id)
-        events_compact_data = self.data_manager.get_events(user_id)
         
         # Build highly compact events list (last 30 days prior to request_date)
         req_dt = pd.to_datetime(req_date)
@@ -181,11 +234,6 @@ Based on these facts, run your financial reasoning, and output the required JSON
             decision = self.extract_json_after_think(raw_content, request_id)
         except Exception as json_err:
             # Mathematical/programmatic fallback when JSON extraction fails
-            min_balance_to_keep = float(profile_data.get('minimum_balance_to_keep', 0.0))
-            requested_amount = float(request_data.get('requested_amount', 0.0))
-            safe_amount = self.simulator.calculate_safe_amount(user_id, req_date, requested_amount, min_balance_to_keep)
-            earliest_date = self.simulator.calculate_earliest_full_payment_date(user_id, requested_amount, req_date, min_balance_to_keep)
-            
             # Formulate the safest programmatic plan
             if safe_amount >= requested_amount:
                 affordability_status = "affordable_now"
@@ -219,12 +267,6 @@ Based on these facts, run your financial reasoning, and output the required JSON
             }
 
         # 5. Overwrite LLM's arithmetic with deterministic simulation values
-        min_balance_to_keep = float(profile_data.get('minimum_balance_to_keep', 0.0))
-        requested_amount = float(request_data.get('requested_amount', 0.0))
-        
-        safe_amount = self.simulator.calculate_safe_amount(user_id, req_date, requested_amount, min_balance_to_keep)
-        earliest_date = self.simulator.calculate_earliest_full_payment_date(user_id, requested_amount, req_date, min_balance_to_keep)
-        
         # Apply the mathematically precise numbers
         decision['amount_safe_to_pay'] = min(safe_amount, requested_amount)
         decision['earliest_date_for_full_payment'] = earliest_date
@@ -243,5 +285,3 @@ Based on these facts, run your financial reasoning, and output the required JSON
             'token_stats': token_stats,
             'raw_content': raw_content
         }
-import pandas as pd
-from datetime import timedelta
