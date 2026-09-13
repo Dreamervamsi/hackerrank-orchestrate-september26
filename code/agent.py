@@ -212,47 +212,49 @@ Based on these facts, run your financial reasoning, and output the required JSON
             {"role": "user", "content": user_prompt}
         ]
 
-        # 3. Call the model
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=800
-        )
-        
-        raw_content = response.choices[0].message.content
-        
-        # Get usage stats if available
-        usage = getattr(response, 'usage', None)
-        token_stats = {
-            'prompt_tokens': getattr(usage, 'prompt_tokens', 0),
-            'completion_tokens': getattr(usage, 'completion_tokens', 0),
-            'total_tokens': getattr(usage, 'total_tokens', 0)
-        }
-
-        # 4. Extract and parse JSON with robust fallback
+        # 3. Call the model with robust try-except for rate-limit resilience
         try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=800
+            )
+            raw_content = response.choices[0].message.content
+            
+            # Get usage stats if available
+            usage = getattr(response, 'usage', None)
+            token_stats = {
+                'prompt_tokens': getattr(usage, 'prompt_tokens', 0),
+                'completion_tokens': getattr(usage, 'completion_tokens', 0),
+                'total_tokens': getattr(usage, 'total_tokens', 0)
+            }
+            
+            # 4. Extract and parse JSON
             decision = self.extract_json_after_think(raw_content, request_id)
-        except Exception as json_err:
-            # Mathematical/programmatic fallback when JSON extraction fails
-            # Formulate the safest programmatic plan
+            
+        except Exception as api_err:
+            # Automatic fallback to deterministic simulation when API fails (e.g. Rate limits exhausted)
+            token_stats = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}
+            raw_content = f"API_LIMIT_FALLBACK: {str(api_err)}"
+            
             if safe_amount >= requested_amount:
                 affordability_status = "affordable_now"
                 recommended_payment_method = "full_payment"
                 payment_plan = "none"
                 earliest_date_for_full_payment = req_date
-                explanation = f"The requested amount of {requested_amount:.2f} is fully safe to pay immediately since the projected daily balance stays safely above the required minimum balance of {min_balance_to_keep:.2f} throughout the 90-day forecast."
+                explanation = f"The requested amount of {requested_amount:.2f} IDR is fully safe to pay immediately since the projected daily balance stays safely above the required minimum balance of {min_balance_to_keep:.2f} IDR throughout the 90-day forecast."
             elif earliest_date:
                 affordability_status = "affordable_later"
                 recommended_payment_method = "wait"
                 payment_plan = f"{earliest_date}:{requested_amount}"
                 earliest_date_for_full_payment = earliest_date
-                explanation = f"The request is affordable later. Waiting until {earliest_date} is recommended to avoid dropping the balance below the required minimum of {min_balance_to_keep:.2f}."
+                explanation = f"The request is affordable later. Waiting until {earliest_date} is recommended to avoid dropping the balance below the required minimum of {min_balance_to_keep:.2f} IDR."
             else:
                 affordability_status = "not_affordable"
                 recommended_payment_method = "not_recommended"
                 payment_plan = "none"
                 earliest_date_for_full_payment = ""
-                explanation = f"The requested payment is currently not affordable within the 90-day forecast period without violating the required minimum balance of {min_balance_to_keep:.2f}."
+                explanation = f"The requested payment is currently not affordable within the 90-day forecast period without violating the required minimum balance of {min_balance_to_keep:.2f} IDR."
                 
             decision = {
                 "request_id": request_id,
@@ -262,7 +264,7 @@ Based on these facts, run your financial reasoning, and output the required JSON
                 "payment_plan": payment_plan,
                 "earliest_date_for_full_payment": earliest_date_for_full_payment,
                 "spending_changes_needed": "none",
-                "decision_explanation": explanation + " (Programmatic Fallback)",
+                "decision_explanation": explanation + " (Programmatic Simulator Fallback)",
                 "supporting_references": ["system_simulator_fallback"]
             }
 
